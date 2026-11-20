@@ -864,13 +864,19 @@ export class Store {
     return { additions, deletions };
   }
 
+  /** The base branch's current tip (it moves when another PR merges first). */
+  baseTipSha(repo: Repo, pr: Pull): string {
+    return repo.refs.get(`refs/heads/${pr.baseRef}`) ?? pr.baseSha;
+  }
+
   /** Is merging `pr` conflicted? A path changed on both sides of the merge base with different results. */
   prConflicts(repo: Repo, pr: Pull): boolean {
-    const base = mergeBase(repo.objects.get.bind(repo.objects), pr.baseSha, pr.headSha);
-    if (base === null) return pr.baseSha !== pr.headSha;
+    const currentBaseSha = this.baseTipSha(repo, pr);
+    const base = mergeBase(repo.objects.get.bind(repo.objects), currentBaseSha, pr.headSha);
+    if (base === null) return currentBaseSha !== pr.headSha;
     const baseCommit = repo.objects.get(base);
     const headCommit = repo.objects.get(pr.headSha);
-    const baseTipCommit = repo.objects.get(pr.baseSha);
+    const baseTipCommit = repo.objects.get(currentBaseSha);
     if (baseCommit?.type !== 'commit' || headCommit?.type !== 'commit' || baseTipCommit?.type !== 'commit') return true;
     const baseTree = parseCommit(baseCommit.data).tree;
     const headTree = parseCommit(headCommit.data).tree;
@@ -898,8 +904,9 @@ export class Store {
   squashMerge(repo: Repo, pr: Pull): string | null {
     if (pr.state !== 'open') return null;
     if (this.prConflicts(repo, pr)) return null;
-    const base = mergeBase(repo.objects.get.bind(repo.objects), pr.baseSha, pr.headSha);
-    const baseCommit = repo.objects.get(pr.baseSha);
+    const currentBaseSha = this.baseTipSha(repo, pr);
+    const base = mergeBase(repo.objects.get.bind(repo.objects), currentBaseSha, pr.headSha);
+    const baseCommit = repo.objects.get(currentBaseSha);
     const headCommit = repo.objects.get(pr.headSha);
     if (baseCommit?.type !== 'commit' || headCommit?.type !== 'commit') return null;
     let tree = parseCommit(baseCommit.data).tree;
@@ -916,7 +923,7 @@ export class Store {
       tree = parseCommit(headCommit.data).tree;
     }
     const message = `Squash merge pull request #${pr.number}: ${pr.title}`;
-    const mergeSha = this.makeCommit(repo, tree, [pr.baseSha], message);
+    const mergeSha = this.makeCommit(repo, tree, [currentBaseSha], message);
     repo.refs.set(`refs/heads/${pr.baseRef}`, mergeSha);
     pr.state = 'closed';
     pr.merged = true;

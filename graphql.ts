@@ -459,7 +459,7 @@ function resolveField(ctx: Ctx, typeName: string, object: Record<string, unknown
     return unknownField(ctx, typeName, name);
   }
 
-  if (typeName === 'User' || typeName === 'Ref') {
+  if (typeName === 'User' || typeName === 'Ref' || typeName === 'IssueComment') {
     if (name in object) {
       const value = object[name];
       if (subs.length > 0 && value !== null && typeof value === 'object' && !Array.isArray(value)) {
