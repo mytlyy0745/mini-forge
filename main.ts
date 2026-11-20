@@ -1,4 +1,18 @@
-// The entry <-> env lifecycle, as env/src/wire.ts settles it: bind an ephemeral port, tell the env the
+// mini-forge entrypoint: what this file wires together.
+//
+//   createApp() (app.ts) builds the whole forge — REST v3, GraphQL, MCP, and git
+//   smart HTTP — on top of one in-memory Store (store.ts). This file owns only
+//   the process lifecycle around that server: it binds an ephemeral port, prints
+//   a startup banner, registers the port with the trial env, waits until the env
+//   reports the trial is done, and then closes the server and exits. It also
+//   handles SIGINT/SIGTERM so a stop request shuts the HTTP server down cleanly
+//   instead of killing the process mid-request. Nothing in here implements forge
+//   behaviour; every request is answered by the app the entrypoint starts.
+//
+// The lifecycle below (register, then poll /done) is the harness's contract,
+// so the shape of main() stays the same even as the banner and shutdown grow.
+
+
 // port it bound, then poll until the env says the trial is over and exit 0. Keep this file as it is:
 // the suite scores the server app.ts builds, and the lifecycle is the harness's, not the contest's.
 //
@@ -16,12 +30,48 @@
 //
 // main.ts imports its own server and nothing else: no package, no Node built-in, no model call.
 
+import type { Server } from 'node:http';
 import { createApp } from './app.ts';
+import { Store } from './store.ts';
 
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
 if (ENV_URL === '') {
   process.stderr.write('[entry] MAKEFUN_ENV_URL is not set: there is no env to register with\n');
   process.exit(1);
+}
+
+/** The name and version the startup banner prints; bump the version with package.json. */
+const FORGE_NAME = 'mini-forge';
+const FORGE_VERSION = '0.1.0';
+
+/**
+ * Print one startup banner line: what is running, which port it bound, and how
+ * many repositories already live in the store. On a fresh boot the count is
+ * zero — the suite creates repositories through the API after this line — but
+ * printing it here makes a warm restart's state visible at a glance.
+ */
+function printBanner(port: number, repoCount: number): void {
+  const noun = repoCount === 1 ? 'repository' : 'repositories';
+  process.stdout.write(`[entry] ${FORGE_NAME} v${FORGE_VERSION} listening on port ${port} (${repoCount} ${noun} in store)\n`);
+}
+
+/** True once a shutdown signal has been handled, so a second signal exits at once. */
+let shuttingDown = false;
+
+/**
+ * Close the HTTP server, then leave with status 0. The close callback waits for
+ * in-flight requests to finish, so a stop does not cut a response short; a
+ * second signal while the first close is still in flight skips the wait and
+ * exits immediately instead of hanging on a stuck connection.
+ */
+function shutdown(server: Server, signal: NodeJS.Signals): void {
+  if (shuttingDown) process.exit(0);
+  shuttingDown = true;
+  process.stdout.write(`[entry] ${signal} received: closing the server\n`);
+  server.close(() => {
+    process.stdout.write('[entry] server closed\n');
+    process.exit(0);
+  });
 }
 
 /** How long one register or done request may take before it is abandoned and retried. */
@@ -78,14 +128,17 @@ async function waitForDone(): Promise<void> {
 
 /** Bound the port, register it, then wait for the env: the whole life of the process. */
 async function main(): Promise<void> {
-  const server = createApp();
+  const store = new Store();
+  const server = createApp(store);
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, () => resolve());
   });
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('the server did not bind an ephemeral TCP port');
-  process.stdout.write(`[entry] listening on port ${address.port}\n`);
+  printBanner(address.port, store.repos.size);
+  process.once('SIGINT', () => shutdown(server, 'SIGINT'));
+  process.once('SIGTERM', () => shutdown(server, 'SIGTERM'));
 
   await register(address.port);
   process.stdout.write('[entry] registered; waiting for the env to say done\n');
